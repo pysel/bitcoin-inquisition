@@ -33,21 +33,17 @@ P2WPKH scriptPubKeys. The balance-check helpers at the bottom verify your
 implementation by querying the node's UTXO set via `scantxoutset` — not by
 trusting the Python objects you returned.
 
-Design note: P2WSH wrapping
----------------------------
-The reference test (test/functional/feature_checktemplateverify.py) builds
-a BARE CTV tree — the CTV script IS the scriptPubKey. That's the tightest
-form, but bare CTV is non-standard for policy, so those spends must be
-submitted via `submitblock`, not the mempool.
+Design note: bare CTV
+---------------------
+Every internal node's scriptPubKey IS the CTV script:
 
-To keep the assignment running on a normal `sendrawtransaction` workflow,
-we wrap every internal node in P2WSH:
+    <PUSH32 <template-hash>> OP_CHECKTEMPLATEVERIFY
 
-    internal_node.scriptPubKey = P2WSH(PUSH32 <h> OP_CHECKTEMPLATEVERIFY)
-
-Spending just requires witness = [raw_ctv_script]. CTV still commits to the
-children's full CTxOut serialization — which means their P2WSH scriptPubKey,
-not the raw CTV script inside.
+Spends have an empty scriptSig and no witness — CTV verifies against the
+scriptPubKey directly. Because bare CTV outputs/spends aren't standard
+for mempool relay, the harness uses `generateblock` to mine txs directly
+into a block (that's also what the reference feature_checktemplateverify.py
+test does).
 """
 
 import sys
@@ -58,16 +54,15 @@ import hashlib
 from decimal import Decimal
 from typing import List
 
-from test_framework.address import program_to_witness, script_to_p2wsh
+from test_framework.address import program_to_witness
 from test_framework.authproxy import AuthServiceProxy, JSONRPCException
 from test_framework.messages import (
     COIN,
     COutPoint,
     CTransaction,
     CTxIn,
-    CTxInWitness,
     CTxOut,
-    sha256,
+    tx_from_hex,
 )
 from test_framework.script import CScript, OP_CHECKTEMPLATEVERIFY
 
@@ -113,13 +108,8 @@ def ctv_script_for(children: List[CTxOut]) -> CScript:
     )
 
 
-def p2wsh_of(raw_script: CScript) -> CScript:
-    """Wrap a raw script in a P2WSH scriptPubKey."""
-    return CScript([0, sha256(bytes(raw_script))])
-
-
 def raw_script_at(tree, level: int, idx: int):
-    """Recompute the raw CTV script for the internal node tree[level][idx].
+    """Recompute the CTV script for the internal node tree[level][idx].
 
     Returns None for leaves (they are plain P2WPKH, not CTV).
     """
@@ -178,7 +168,7 @@ def ternary_secure_tree(depth: int, namespace: str = NS_FULL) -> List[List[CTxOu
     * INTERNAL NODE at tree[k][i]:
         Its three children are tree[k+1][3*i], [3*i+1], [3*i+2].
         - nValue      = sum(child.nValue) + FEE_PER_LEVEL
-        - scriptPubKey = p2wsh_of(ctv_script_for(those three children))
+        - scriptPubKey = ctv_script_for(those three children)   # bare CTV
 
     Implementation hint
     -------------------
@@ -204,9 +194,11 @@ def unroll_tree(tree, root_outpoint: COutPoint) -> List[CTransaction]:
     Per-tx shape
     ------------
         version = 2
-        vin     = [CTxIn(parent_outpoint)]         # 1 input, no scriptSig
+        vin     = [CTxIn(parent_outpoint)]         # empty scriptSig, no witness
         vout    = [child_0, child_1, child_2]      # 3 CTxOuts verbatim from the tree
-        witness.vtxinwit[0].scriptWitness.stack = [raw_ctv_script]
+
+    Bare CTV means the parent's scriptPubKey IS the CTV script, and CTV
+    verifies against it automatically. You don't populate any witness data.
 
     Ordering
     --------
@@ -223,7 +215,6 @@ def unroll_tree(tree, root_outpoint: COutPoint) -> List[CTransaction]:
     ----
     For each internal node at tree[k][i]:
       - Its children are tree[k+1][3*i .. 3*i+3].
-      - Its raw CTV script (for the witness) is raw_script_at(tree, k, i).
       - Its outpoint is the (txid, vout) of whichever tx produced it. You
         know the root's outpoint; for deeper nodes, compute txid via
         CTransaction.rehash() (and `int(tx.hash, 16)`) and track the vout
@@ -301,46 +292,41 @@ def verify_tree_shape(tree, depth: int, namespace: str):
             expected_amt = sum(c.nValue for c in children) + FEE_PER_LEVEL
             assert parent.nValue == expected_amt, \
                 f"tree[{k}][{idx}] nValue = {parent.nValue}, expected {expected_amt}"
-            expected_spk = p2wsh_of(ctv_script_for(children))
+            expected_spk = ctv_script_for(children)
             assert bytes(parent.scriptPubKey) == bytes(expected_spk), \
-                f"tree[{k}][{idx}] scriptPubKey doesn't match P2WSH(CTV(children))"
+                f"tree[{k}][{idx}] scriptPubKey doesn't match CTV(children)"
     print(f"✓ tree shape correct: {len(tree)} levels, {len(tree[depth])} leaves, "
           f"root holds {tree[0][0].nValue} sat")
 
 
 def fund_root(w, tree) -> COutPoint:
-    """Pay the root's scriptPubKey, mine 1 block, return the outpoint."""
-    raw_root = ctv_script_for(tree[1])
-    addr = script_to_p2wsh(raw_root)
-    amount_btc = Decimal(tree[0][0].nValue) / COIN
-    print(f"Funding root: {amount_btc} BTC -> {addr}")
-    txid = w.sendtoaddress(addr, amount_btc)
-    w.generatetoaddress(1, w.getnewaddress())
-    funding_tx = w.getrawtransaction(txid, True)
-    vout_index = next(
-        i for i, vo in enumerate(funding_tx["vout"])
-        if vo["scriptPubKey"]["hex"] == bytes(tree[0][0].scriptPubKey).hex()
-    )
-    print(f"✓ root UTXO: {txid}:{vout_index}")
-    return COutPoint(int(txid, 16), vout_index)
+    """Build a funding tx whose vout 0 is the bare-CTV root, mine it directly."""
+    u = max(w.listunspent(), key=lambda x: x["amount"])
+    in_sats  = int(Decimal(str(u["amount"])) * COIN)
+    root_amt = tree[0][0].nValue
+    fee      = 500
+    change_addr = w.getnewaddress()
+    change_spk  = bytes.fromhex(w.getaddressinfo(change_addr)["scriptPubKey"])
+
+    raw = CTransaction()
+    raw.version = 2
+    raw.vin  = [CTxIn(COutPoint(int(u["txid"], 16), u["vout"]))]
+    raw.vout = [tree[0][0], CTxOut(in_sats - root_amt - fee, CScript(change_spk))]
+    signed = w.signrawtransactionwithwallet(raw.serialize().hex())
+    assert signed["complete"], f"sign failed: {signed.get('errors')}"
+
+    funding_txid = tx_from_hex(signed["hex"]).rehash()
+    w.generateblock(w.getnewaddress(), [signed["hex"]])
+    print(f"✓ root UTXO: {funding_txid}:0 ({root_amt} sat, bare CTV)")
+    return COutPoint(int(funding_txid, 16), 0)
 
 
 def broadcast_and_mine(w, txs):
-    """Broadcast each tx in order, then mine one block and confirm all landed."""
-    print(f"Broadcasting {len(txs)} tx(s)...")
-    for i, tx in enumerate(txs):
-        try:
-            w.sendrawtransaction(tx.serialize().hex())
-        except JSONRPCException as e:
-            print(f"✗ tx #{i} rejected: {e.error.get('message')}")
-            print(f"   hex: {tx.serialize().hex()}")
-            raise
-    print(f"✓ all {len(txs)} tx(s) accepted into mempool")
-    w.generatetoaddress(1, w.getnewaddress())
-    for tx in txs:
-        info = w.getrawtransaction(tx.rehash(), True)
-        assert info.get("confirmations", 0) >= 1, f"tx {tx.rehash()} not confirmed"
-    print(f"✓ all {len(txs)} tx(s) confirmed in one block")
+    """Mine all txs directly into one block (bare CTV spends are non-standard
+    for relay, so we bypass the mempool via generateblock)."""
+    hex_list = [tx.serialize().hex() for tx in txs]
+    result = w.generateblock(w.getnewaddress(), hex_list)
+    print(f"✓ mined {len(txs)} tx(s) in block {result['hash'][:16]}…")
 
 
 # -----------------------------------------------------------------------------

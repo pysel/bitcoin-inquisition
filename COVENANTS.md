@@ -77,7 +77,8 @@ docker exec btc bitcoin-cli -rpcuser=student -rpcpassword=student -rpcwallet=stu
 ### 2.1 bitcoin-cli (easiest; limited for covenants)
 
 Great for wallet ops, mining, inspection. **Not practical for building covenant
-scripts** — the CLI has no way to emit raw opcodes or assemble witness stacks.
+scripts** — the CLI has no way to emit raw opcodes or assemble the transactions
+that spend covenant-locked outputs.
 
 ```bash
 alias bcli='docker exec btc bitcoin-cli -rpcuser=student -rpcpassword=student -rpcwallet=student'
@@ -115,21 +116,15 @@ print(rpc.sendrawtransaction(hex_tx))
 
 The repo's `test/functional/test_framework/` is the **canonical library for
 building covenant transactions** against this node. It is self-contained (no
-pip install), handles tx serialization, taproot construction, CTV hash, and
-signing.
+pip install), handles tx serialization, the BIP 119 template hash, and signing.
 
 Key modules:
 
-- `test_framework.messages` — `CTransaction`, `CTxIn`, `CTxOut`, `COutPoint`,
-  `CTxInWitness`, `sha256`. `CTransaction.get_standard_template_hash(nIn)` at
+- `test_framework.messages` — `CTransaction`, `CTxIn`, `CTxOut`, `COutPoint`.
+  `CTransaction.get_standard_template_hash(nIn)` at
   `test/functional/test_framework/messages.py:639` implements the BIP 119 hash.
-- `test_framework.script` — `CScript`, opcode constants
-  (`OP_CHECKTEMPLATEVERIFY`, `OP_CAT`, `OP_CHECKSIGFROMSTACK`,
-  `OP_INTERNALKEY`), and `taproot_construct(internal_pubkey, [(name, script, leafver)])`.
-- `test_framework.wallet` — `MiniWallet` with deterministic keys, `sign_tx()`.
-- `test_framework.blocktools` — `create_block`, `create_coinbase`,
-  `add_witness_commitment` if you want to mine blocks directly (bypassing RPC).
-- `test_framework.key` — `ECKey`, `compute_xonly_pubkey` for taproot.
+- `test_framework.script` — `CScript` and opcode constants
+  (`OP_CHECKTEMPLATEVERIFY`, `OP_CAT`, `OP_CHECKSIGFROMSTACK`, `OP_INTERNALKEY`).
 
 To use it from a host script (outside a test harness), either:
 
@@ -150,10 +145,10 @@ Reference examples to crib from:
 The student file uses this import block:
 
 ```python
-from test_framework.address   import program_to_witness, script_to_p2wsh
+from test_framework.address   import program_to_witness
 from test_framework.authproxy import AuthServiceProxy, JSONRPCException
 from test_framework.messages  import (COIN, COutPoint, CTransaction,
-                                       CTxIn, CTxInWitness, CTxOut, sha256)
+                                       CTxIn, CTxOut)
 from test_framework.script    import CScript, OP_CHECKTEMPLATEVERIFY
 ```
 
@@ -195,15 +190,6 @@ plus which output (0, 1, 2, …) within that tx.
 op = COutPoint(int(txid_hex, 16), 0)   # output #0 of that txid
 ```
 
-#### `CTxInWitness`
-Each input needs some data to "unlock" the output it's spending (e.g. a
-signature, or — for CTV — just the raw locking script). That data goes
-here:
-```python
-tx.wit.vtxinwit = [CTxInWitness()]
-tx.wit.vtxinwit[0].scriptWitness.stack = [my_unlock_bytes]
-```
-
 #### `COIN`
 The number `100_000_000`. Amounts inside scripts are in **sats**; the
 RPC takes **BTC**. Use `COIN` to convert:
@@ -211,10 +197,6 @@ RPC takes **BTC**. Use `COIN` to convert:
 from decimal import Decimal
 btc_value = Decimal(40_000) / COIN   # 40000 sats → 0.0004 BTC
 ```
-
-#### `sha256(data)`
-Plain SHA-256. Used here to hash a script when building a funding
-address for it.
 
 ### Scripts (`test_framework.script`)
 
@@ -236,13 +218,9 @@ opcode in a script creates a CTV-locked output.
 
 ### Addresses (`test_framework.address`)
 
-You won't be manipulating address bytes yourself — these are two helpers
-that give you a string you can hand to `sendtoaddress`:
-
-- `script_to_p2wsh(script)` — "give me the address that pays into a UTXO
-  locked by this custom script." Use this to fund a CTV root.
-- `program_to_witness(0, hash160)` — "give me the address for this
-  20-byte program." Use this if you ever need to display a leaf address.
+- `program_to_witness(0, hash160)` — turns a 20-byte program into a
+  `bcrt1q…` address string. Use this if you want to display a leaf
+  address for inspection.
 
 ### Talking to the node (`test_framework.authproxy`)
 
@@ -262,46 +240,58 @@ wallet not loaded, etc.). Catch it if you want to read `e.error["message"]`.
 
 ## 3. Concrete CTV workflow (the one you'll show students)
 
-The full pattern, distilled from `feature_checktemplateverify.py:61–419`:
+The full pattern — CTV script directly as the output's scriptPubKey (bare
+CTV, matching `ctv.py` and `feature_checktemplateverify.py`):
 
 ```python
-from io import BytesIO
-from decimal import Decimal
-from test_framework.messages import CTransaction, CTxIn, CTxOut, CTxInWitness, COutPoint, COIN, sha256
-from test_framework.script import CScript, OP_CHECKTEMPLATEVERIFY
-from bitcoinrpc.authproxy import AuthServiceProxy
+from test_framework.authproxy import AuthServiceProxy
+from test_framework.messages  import (CTransaction, CTxIn, CTxOut, COutPoint,
+                                       COIN, tx_from_hex)
+from test_framework.script    import CScript, OP_CHECKTEMPLATEVERIFY
 
 rpc = AuthServiceProxy("http://student:student@localhost:18443/wallet/student")
 
 # 1. Decide what spending the covenant UTXO must produce.
-outputs = [CTxOut(50_000, bytes.fromhex("0014" + "11"*20))]  # e.g. one P2WPKH output
+outputs = [CTxOut(50_000, bytes.fromhex("0014" + "11"*20))]
 fee = 500
+amount = sum(o.nValue for o in outputs) + fee
 
-# 2. Compute the BIP 119 StandardTemplateHash for a single-input spend at vin index 0.
+# 2. Compute the BIP 119 StandardTemplateHash for a single-input spend.
 template_tx = CTransaction()
 template_tx.version = 2
-template_tx.vin = [CTxIn()]          # placeholder; CTV hash commits to vin count, not txid
+template_tx.vin  = [CTxIn()]          # CTV commits to vin count, not txid
 template_tx.vout = outputs
 template_hash = template_tx.get_standard_template_hash(nIn=0)
 
 # 3. Build the covenant script: <32-byte hash> OP_CHECKTEMPLATEVERIFY.
-ctv_script = CScript([template_hash, OP_CHECKTEMPLATEVERIFY])
+#    This is *both* the locking script and the scriptPubKey of the covenant UTXO.
+ctv_spk = CScript(bytes([0x20]) + template_hash + bytes([OP_CHECKTEMPLATEVERIFY]))
 
-# 4. Fund the covenant script. Simplest path: fund a P2WSH wrapping it.
-p2wsh = CScript([0, sha256(ctv_script)])
-amount = sum(o.nValue for o in outputs) + fee
-funding_txid = rpc.sendtoaddress("", Decimal(amount) / COIN)  # or craft manually
-# ... find the vout index of the P2WSH output on funding_txid ...
+# 4. Fund it: build a raw tx that pays `amount` into the bare CTV script.
+#    Bare CTV has no standard address, so we craft + sign + mine directly.
+u = max(rpc.listunspent(), key=lambda x: x["amount"])
+in_sats = int(u["amount"] * COIN)
+change_addr = rpc.getnewaddress()
+change_spk  = bytes.fromhex(rpc.getaddressinfo(change_addr)["scriptPubKey"])
+fund = CTransaction()
+fund.version = 2
+fund.vin  = [CTxIn(COutPoint(int(u["txid"], 16), u["vout"]))]
+fund.vout = [CTxOut(amount, ctv_spk),
+             CTxOut(in_sats - amount - fee, CScript(change_spk))]
+signed = rpc.signrawtransactionwithwallet(fund.serialize().hex())
+funding_txid = tx_from_hex(signed["hex"]).rehash()
+rpc.generateblock(rpc.getnewaddress(), [signed["hex"]])
 
-# 5. Spend: build the exact tx the template commits to, satisfy witness.
+# 5. Spend: build the exact tx the template commits to. The input has
+#    an empty scriptSig — CTV verifies directly against the scriptPubKey.
 spend = CTransaction()
 spend.version = 2
-spend.vin = [CTxIn(COutPoint(int(funding_txid, 16), vout_index))]
-spend.vout = outputs                         # must match byte-for-byte
-spend.wit.vtxinwit = [CTxInWitness()]
-spend.wit.vtxinwit[0].scriptWitness.stack = [ctv_script]  # P2WSH reveal
+spend.vin  = [CTxIn(COutPoint(int(funding_txid, 16), 0))]
+spend.vout = outputs                       # must match byte-for-byte
 
-rpc.sendrawtransaction(spend.serialize().hex())
+# Bare CTV spends aren't standard for relay → mine via generateblock, not
+# sendrawtransaction.
+rpc.generateblock(rpc.getnewaddress(), [spend.serialize().hex()])
 ```
 
 ---
