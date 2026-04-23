@@ -23,3 +23,5 @@ test/lint/test_runner/target/
 /guix-build-*
 
 /ci/scratch/
+ctv-dev.py
+venv/

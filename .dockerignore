@@ -1,0 +1,14 @@
+.git
+.github
+build
+build-*
+*.o
+*.a
+*.so
+*.dylib
+src/binana.h
+releases
+guix-build-*
+ci/scratch
+.vscode
+.idea
