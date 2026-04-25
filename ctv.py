@@ -5,7 +5,7 @@ Covenants Midterm — Ternary CTV Congestion-Control Tree
 
 You will build a ternary (3-child) CTV tree where:
 
-  - Every LEAF is a P2WPKH payout (LEAF_AMOUNT sats).
+  - Every LEAF is a payout (LEAF_AMOUNT sats) to a deterministic recipient.
   - Every INTERNAL node is a CTV-protected UTXO that, when spent, is forced
     to produce exactly its three committed children as outputs.
   - The ROOT is funded by a single normal wallet tx. From that one on-chain
@@ -17,8 +17,9 @@ implement the covenant logic in the three TODOs marked below.
 
 Prerequisites
 -------------
-  docker run -d --name btc -p 18443:18443 -p 18444:18444 \\
-      -v btcdata:/home/bitcoin/.bitcoin bitcoin-inquisition
+  docker pull pycel/bitcoin-inquisition:latest                                                                                                                                
+  docker tag pycel/bitcoin-inquisition:latest bitcoin-inquisition:latest
+  docker run -d --name btc -p 18443:18443 -p 18444:18444 -v btcdata:/home/bitcoin/.bitcoin bitcoin-inquisition
 
 Run
 ---
@@ -29,9 +30,9 @@ Grading
 -------
 Leaf recipients are generated DETERMINISTICALLY from a fixed namespace, so
 every run of this script (by you, or by the grader) targets the same 27
-P2WPKH scriptPubKeys. The balance-check helpers at the bottom verify your
-implementation by querying the node's UTXO set via `scantxoutset` — not by
-trusting the Python objects you returned.
+recipient scriptPubKeys. The balance-check helpers at the bottom verify
+your implementation by querying the node's UTXO set via `scantxoutset` —
+not by trusting the Python objects you returned.
 
 Design note: bare CTV
 ---------------------
@@ -39,11 +40,10 @@ Every internal node's scriptPubKey IS the CTV script:
 
     <PUSH32 <template-hash>> OP_CHECKTEMPLATEVERIFY
 
-Spends have an empty scriptSig and no witness — CTV verifies against the
-scriptPubKey directly. Because bare CTV outputs/spends aren't standard
-for mempool relay, the harness uses `generateblock` to mine txs directly
-into a block (that's also what the reference feature_checktemplateverify.py
-test does).
+Spends have an empty scriptSig — CTV verifies against the scriptPubKey
+directly. Because bare CTV outputs/spends aren't standard for mempool
+relay, the harness uses `generateblock` to mine txs directly into a block
+(that's also what the reference feature_checktemplateverify.py test does).
 """
 
 import sys

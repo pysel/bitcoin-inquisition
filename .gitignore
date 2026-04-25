@@ -25,3 +25,4 @@ test/lint/test_runner/target/
 /ci/scratch/
 ctv-dev.py
 venv/
+.claude/
