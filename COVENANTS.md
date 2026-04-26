@@ -40,7 +40,7 @@ then `docker run …` exactly as above.
 Quick sanity check:
 
 ```bash
-alias bcli='docker exec btc bitcoin-cli -rpcuser=student -rpcpassword=student -rpcwallet=student'
+alias bcli='docker exec btc bitcoin-cli -rpcuser=student -rpcpassword=student -rpcwallet=student -named'
 bcli getblockchaininfo
 ```
 
@@ -181,3 +181,158 @@ wallet not loaded, etc.). Catch it if you want to read `e.error["message"]`.
 
 ---
 
+## 3. The functions already filled in `ctv.py`
+
+Beyond the imports, `ctv.py` ships with helpers and a harness that you
+should read but **not modify**. Some you'll call directly from your three
+TODOs; others run automatically and verify your work. They're grouped
+below by what they do.
+
+### Building CTV scripts
+
+#### `template_hash_for_outputs(outputs, nIn=0, nVin=1)`
+
+Computes the BIP 119 *StandardTemplateHash* for a transaction with `nVin`
+inputs and the given `outputs`. This 32-byte hash is the commitment that
+goes inside a CTV scriptPubKey.
+
+```python
+h = template_hash_for_outputs(children)   # 32 bytes
+```
+
+#### `ctv_script_for(children)`
+
+Builds the **bare CTV scriptPubKey** that locks an output to spend into
+exactly `children`. Layout: `<PUSH32 template_hash> OP_CHECKTEMPLATEVERIFY`.
+
+```python
+parent_spk = ctv_script_for([child0, child1, child2])
+parent     = CTxOut(amount, parent_spk)
+```
+
+#### `raw_script_at(tree, level, idx)`
+
+Recomputes the CTV scriptPubKey for the internal node at
+`tree[level][idx]`. Returns `None` for leaves (they're plain recipient
+outputs, not CTV). Useful for debugging.
+
+### Deterministic leaf recipients
+
+These produce **the same outputs every run**, so the grader knows exactly
+which scriptPubKeys to look for. Do not change the namespaces.
+
+#### `leaf_program(namespace, i)`
+
+Returns a 20-byte recipient program for leaf index `i` under `namespace`,
+computed as `sha256(f"{namespace}:{i}")[:20]`.
+
+```python
+program = leaf_program(NS_FULL, 7)   # always the same 20 bytes
+```
+
+#### `leaf_scriptpubkey(program)`
+
+Wraps a 20-byte program into the 22-byte recipient scriptPubKey
+(`0x00 0x14 <program>`).
+
+```python
+spk = leaf_scriptpubkey(program)         # 22 bytes
+leaf = CTxOut(LEAF_AMOUNT, CScript(spk))
+```
+
+#### `leaf_programs(namespace, count)`
+
+Convenience wrapper: returns the list of leaf programs for indices
+`0..count-1` under `namespace`. Used by the balance checks.
+
+### RPC helper
+
+#### `rpc_for(wallet=None)`
+
+Returns an `AuthServiceProxy` connected to the regtest node, optionally
+scoped to a named wallet via `/wallet/<name>`.
+
+```python
+node = rpc_for()              # node-level RPC
+w    = rpc_for("student")     # wallet-scoped RPC
+```
+
+### Wallet setup and root funding
+
+#### `ensure_wallet_and_funds(min_blocks=101)`
+
+Loads or creates the `student` wallet and mines blocks until at least
+`min_blocks` mature coinbases exist, so subsequent funding transactions
+have spendable coins. Returns the wallet RPC handle.
+
+#### `fund_root(w, tree)`
+
+Builds, signs, and mines one funding transaction whose `vout[0]` is the
+bare-CTV root of `tree`. Returns the `COutPoint` of that root output —
+this is what your first unroll transaction will spend.
+
+### Broadcasting
+
+#### `broadcast_and_mine(w, txs)`
+
+Mines a list of transactions directly into a single block via
+`generateblock`.
+
+### Structural and balance checks
+
+These are the assertions the grader runs against your work.
+
+#### `verify_tree_shape(tree, depth, namespace)`
+
+Static check on the tree your `ternary_secure_tree` returned: correct
+number of levels, correct branching at each level, leaves match the
+deterministic recipients for `namespace`, and each parent's amount equals
+`sum(children) + FEE_PER_LEVEL`.
+
+#### `assert_all_leaves_funded(namespace, count, expected_sats)`
+
+Queries the UTXO set via `scantxoutset` and asserts that every one of
+the `count` deterministic leaves under `namespace` holds at least
+`expected_sats`. Used by demo 1 (full unroll).
+
+#### `assert_leaf_state(namespace, count, funded_leaves, expected_sats)`
+
+Like the above but asserts that **only** the leaves in `funded_leaves`
+are funded and every other leaf is empty. Used by demo 2 (partial
+unroll), where unrolling to one leaf necessarily funds its bottom-level
+triplet but nothing else.
+
+### Entry points
+
+#### `demo_full_unroll(w)`
+
+Builds the depth-3 tree, funds the root, runs your `unroll_tree`, mines
+all 13 unroll transactions, and asserts that all 27 leaves are funded.
+
+#### `demo_partial_unroll(w, target_leaf=13)`
+
+Builds a fresh tree under a separate namespace, funds the root, runs your
+`unroll_path` for `target_leaf`, mines exactly `TREE_DEPTH` path
+transactions, and asserts only the bottom-level triplet containing
+`target_leaf` is funded.
+
+#### `main()`
+
+Runs setup, then `demo_full_unroll`, then `demo_partial_unroll`. This is
+what `python3 ctv.py` executes.
+
+---
+
+## 3. What to Test
+
+Make sure that before your submit, the following use cases are covered via your solution
+
+- Your solution doesn't break when different tree depths are used. This is a great time to apply what you learned in 130A about tree data structures :) 
+- Make sure you understand the format of the tree that has to be returned from ternary_secure_tree. It is an array with tree[i] containing all the nodes on level i (tree[0] is a single root, tree[depth] contains 3 ** depth children, etc).
+- Make sure that you propagate the FEE_PER_LEVEL correctly. The docs specify the right logic, but it is easy to miscalculate this. 
+- If your solution is flexible enough (i.e. you properly utilize the BRANCHING variable), you will be able to create a tree with arbitrary branching (4-branching, 5-branching, etc) by modifying the BRANCHING variable. This is not a requirement, but you can play around with your solution by modifying this parameter.
+- Before you submit, make sure that at least the included demos pass when you run your code. 
+
+---
+
+Good luck!
