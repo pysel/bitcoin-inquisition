@@ -323,15 +323,15 @@ what `python3 ctv.py` executes.
 
 ---
 
-## 3. What to Test
+## 3. Tips
 
-Make sure that before your submit, the following use cases are covered via your solution
+Consider these things when implementing the solution:
 
 - Your solution doesn't break when different tree depths are used. This is a great time to apply what you learned in 130A about tree data structures :) 
-- Make sure you understand the format of the tree that has to be returned from ternary_secure_tree. It is an array with tree[i] containing all the nodes on level i (tree[0] is a single root, tree[depth] contains 3 ** depth children, etc).
-- Make sure that you propagate the FEE_PER_LEVEL correctly. The docs specify the right logic, but it is easy to miscalculate this. 
+- You understand the format of the tree that has to be returned from ternary_secure_tree. It is an array with tree[i] containing all the nodes on level i (tree[0] is a single root, tree[depth] contains *3 ** depth* children, etc).
+- You propagate the *FEE_PER_LEVEL* correctly. The docs specify the right logic, but it is easy to miscalculate this. 
 - If your solution is flexible enough (i.e. you properly utilize the BRANCHING variable), you will be able to create a tree with arbitrary branching (4-branching, 5-branching, etc) by modifying the BRANCHING variable. This is not a requirement, but you can play around with your solution by modifying this parameter.
-- Before you submit, make sure that at least the included demos pass when you run your code. 
+- At least the included demos pass when you run your code.
 
 ---
 
