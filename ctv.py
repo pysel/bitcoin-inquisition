@@ -225,7 +225,7 @@ def unroll_tree(tree, root_outpoint: COutPoint) -> List[CTransaction]:
 
 
 # =============================================================================
-# Bonus TODO — partial unroll to a single leaf
+# TODO — partial unroll to a single leaf
 # =============================================================================
 
 def unroll_path(tree, leaf_index: int, root_outpoint: COutPoint) -> List[CTransaction]:
@@ -242,8 +242,8 @@ def unroll_path(tree, leaf_index: int, root_outpoint: COutPoint) -> List[CTransa
     Hint: at level k (spending the parent), the child index on the path to
     `leaf_index` is (leaf_index // BRANCHING**(depth - k - 1)) % BRANCHING.
     """
-    # TODO (bonus): implement unroll_path
-    raise NotImplementedError("Bonus TODO — partial unroll")
+    # TODO: implement unroll_path
+    raise NotImplementedError("TODO — partial unroll")
 
 
 # =============================================================================
@@ -410,7 +410,7 @@ def demo_full_unroll(w):
 
 
 def demo_partial_unroll(w, target_leaf: int = 13):
-    banner(f"Demo 2 (bonus) — partial unroll to leaf #{target_leaf}")
+    banner(f"Demo 2 — partial unroll to leaf #{target_leaf}")
     tree = ternary_secure_tree(TREE_DEPTH, namespace=NS_PARTIAL)
     verify_tree_shape(tree, TREE_DEPTH, NS_PARTIAL)
 
